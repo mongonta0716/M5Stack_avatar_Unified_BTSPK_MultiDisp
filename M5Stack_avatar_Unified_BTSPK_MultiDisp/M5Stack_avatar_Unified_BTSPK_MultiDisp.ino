@@ -1,37 +1,66 @@
-#if defined ( ARDUINO )
-
-#include <Arduino.h>
-
-//// If you use SD card, write this.
-//#include <SD.h>
-//
-//// If you use SPIFFS, write this.
-//#include <SPIFFS.h>
-
-#endif
-#include <M5Unified.h>
-#include <M5UnitOLED.h>
 #include <M5UnitLCD.h>
-
-//M5UnitOLED oled;
+#include <M5UnitOLED.h>
+#include <M5Unified.h>
+#include <driver/adc.h>
 LGFX_Device* gfx2 = nullptr;
 
-int16_t lipsync_level = 0;
+// --------------------
+// サーボピンの初期設定
+#if defined(ARDUINO_M5STACK_Core2)
+  // M5Stack Core2用のサーボの設定
+  // Port.A X:G32, Y:G33
+  // Port.C X:G13, Y:G14
+  // スタックチャン基板 X:G27, Y:G19
+  #define SERVO_PIN_X 13
+  #define SERVO_PIN_Y 14
+#elif defined( ARDUINO_M5STACK_FIRE )
+  // M5Stack Fireの場合はPort.A(X:G22, Y:G21)のみです。
+  // I2Cと同時利用は不可
+  #define SERVO_PIN_X 22
+  #define SERVO_PIN_Y 21
+#elif defined( ARDUINO_M5Stack_Core_ESP32 )
+  // M5Stack Basic/Gray/Go用の設定
+  // Port.A X:G22, Y:G21
+  // Port.C X:G16, Y:G17
+  // スタックチャン基板 X:G5, Y:G2
+  #define SERVO_PIN_X 16
+  #define SERVO_PIN_Y 17
+#endif
+// サーボピンの初期設定end
+// --------------------
 
+
+// --------------------
+// Avatar関連の初期設定
 #include "Avatar.h"
-#if defined( ARDUINO_M5STACK_FIRE ) || defined(ARDUINO_M5STACK_Core2)
-//#define USE_ATARU_FACE
-#ifdef USE_ATARU_FACE  
-#include "AtaruFace.h"
-#endif
-#endif
 using namespace m5avatar;
 
 Avatar avatar;
-#ifdef USE_ATARU_FACE  
-Face* face;
-ColorPalette* cp;
-#endif
+static int32_t lipsync_level = 0;       // リップシンク値
+static float lipsync_level_max = 20.0f; // リップシンクの上限初期値
+float mouth_ratio = 0.0f;
+// Avatar関連の設定 end
+// --------------------
+
+// --------------------
+// サーボ関連の初期設定
+#include <ServoEasing.hpp>
+ServoEasing servo_x;
+ServoEasing servo_y;
+
+#define START_DEGREE_VALUE_X 90
+#define START_DEGREE_VALUE_Y 90
+int servo_offset_x = 0;                 // X軸サーボのオフセット（90°からの+-で設定）
+int servo_offset_y = 0;                 // Y軸サーボのオフセット（90°からの+-で設定）
+static long interval_min = 1000;        // 待機時インターバル最小
+static long interval_max = 5000;        // 待機時インターバル最大
+static long move_time_min = 500;        // 待機時のサーボ移動時間最小
+static long move_time_max = 1000;       // 待機時のサーボ移動時間最大
+static long sing_interval_min = 1000;   // 歌うモードのサーボ移動時間最小
+static long sing_interval_max = 2000;   // 歌うモードのサーボ移動時間最大
+// サーボ関連の設定 end
+// --------------------
+
 
 /// need ESP32-A2DP library. ( URL : https://github.com/pschatzmann/ESP32-A2DP/ )
 #include <BluetoothA2DPSink.h>
@@ -40,7 +69,7 @@ ColorPalette* cp;
 static constexpr uint8_t m5spk_virtual_channel = 0;
 
 /// set ESP32-A2DP device name
-static constexpr char bt_device_name[] = "ESP32";
+static constexpr char bt_device_name[] = "ESP322";
 
 
 class BluetoothA2DPSink_M5Speaker : public BluetoothA2DPSink
@@ -95,25 +124,24 @@ protected:
     case ESP_A2D_CONNECTION_STATE_EVT:
       if (ESP_A2D_CONNECTION_STATE_CONNECTED == a2d->conn_stat.state)
       { // 接続
-          avatar.setExpression(Expression::Neutral);    
+
       }
       else
       if (ESP_A2D_CONNECTION_STATE_DISCONNECTED == a2d->conn_stat.state)
       { // 切断
-          avatar.setExpression(Expression::Sleepy);    
+
       }
       break;
 
     case ESP_A2D_AUDIO_STATE_EVT:
       if (ESP_A2D_AUDIO_STATE_STARTED == a2d->audio_stat.state)
       { // 再生
-        avatar.setExpression(Expression::Neutral);    
+
       } else
       if ( ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND == a2d->audio_stat.state
         || ESP_A2D_AUDIO_STATE_STOPPED        == a2d->audio_stat.state )
       { // 停止
         clearMetaData();
-        avatar.setExpression(Expression::Doubt);    
       }
       break;
 
@@ -170,8 +198,7 @@ protected:
     /// When the queue is empty or full, delay processing is performed.
     if (M5.Speaker.isPlaying(m5spk_virtual_channel) != 1)
     {
-      vTaskDelay(5 / portTICK_RATE_MS);
-      while (M5.Speaker.isPlaying(m5spk_virtual_channel) == 2) { taskYIELD(); }
+      do { vTaskDelay(1); } while (M5.Speaker.isPlaying(m5spk_virtual_channel) > 1);
     }
     bool flip = !_flip_index;
     if (_flip_buf_size[flip] < length)
@@ -443,17 +470,17 @@ void gfxLoop(LGFX_Device* gfx)
         if (((x * bw) & 7) == 0) { gfx->display(); }
         int32_t f = fft.get(x);
         int y = (f * fft_height) >> 18;
-        if (x > 0 and x < 10) { // 0〜31の範囲でlipsyncでピックアップしたい音域を選びます。
-          int32_t f1 = f * 100;
-          lipsync_temp = std::max(lipsync_temp, f1 >> 19); // 指定した範囲で最も高い音量を設定。
-        }
         if (y > fft_height) { y = fft_height; }
         y = dsp_height - y;
         int py = prev_y[x];
+        if (x > 5 and x <= xe) { // 0〜63の範囲でlipsyncでピックアップしたい音域を選びます。xeは最大
+          //printf("x:%d, y:%d, f:%d, lipsync_temp:%d\n", x, y, f, lipsync_temp);
+          lipsync_temp = lipsync_temp + f;
+        }
         if (y != py)
         {
 //          gfx->fillRect(x * bw, y, bw - 1, py - y, (y < py) ? 0x99AAFFu : 0x000033u);
-            if (x > 0 and x < 10) { // 0〜31の範囲でlipsyncでピックアップしたい音域を選びます。
+            if (x > 5 and x <= xe) { // 0〜63の範囲でlipsyncでピックアップしたい音域を選びます。xeは最大
               gfx->fillRect(x * bw, y, bw - 1, py - y, (y < py) ? 0x00F800u : 0x000033u);
             } else {
               gfx->fillRect(x * bw, y, bw - 1, py - y, (y < py) ? 0x99AAFFu : 0x000033u);
@@ -475,12 +502,87 @@ void gfxLoop(LGFX_Device* gfx)
           gfx->writeFastHLine(x * bw, py, bw - 1, TFT_WHITE);
         }
       }
-      lipsync_level = lipsync_temp; // リップシンクを設定
+      // ログは下記をコメントアウトしてください。
+      //printf("data_temp=%d\n",lipsync_temp);
+      lipsync_level = lipsync_temp >> 16; // リップシンクを設定
+      //printf("data=%d\n",lipsync_level);
       gfx->display();
       gfx->endWrite();
     }
   }
 }
+
+void moveX(int x, uint32_t millis_for_move = 0) {
+  if (millis_for_move == 0) {
+    servo_x.easeTo(x + servo_offset_x);
+  } else {
+    servo_x.easeToD(x + servo_offset_x, millis_for_move);
+  }
+}
+
+void moveY(int y, uint32_t millis_for_move = 0) {
+  if (millis_for_move == 0) {
+    servo_y.easeTo(y + servo_offset_y);
+  } else {
+    servo_y.easeToD(y + servo_offset_y, millis_for_move);
+  }
+}
+
+void moveXY(int x, int y, uint32_t millis_for_move = 0) {
+  if (millis_for_move == 0) {
+    servo_x.setEaseTo(x + servo_offset_x);
+    servo_y.setEaseTo(y + servo_offset_y);
+  } else {
+    servo_x.setEaseToD(x + servo_offset_x, millis_for_move);
+    servo_y.setEaseToD(y + servo_offset_y, millis_for_move);
+  }
+  // サーボが停止するまでウェイトします。
+  synchronizeAllServosStartAndWaitForAllServosToStop();
+}
+
+void servoLoop(void *args) {
+  long move_time = 0;
+  long interval_time = 0;
+  long move_x = 0;
+  long move_y = 0;
+  float gaze_x = 0.0f;
+  float gaze_y = 0.0f;
+  bool sing_mode = false;
+  for (;;) {
+    if (mouth_ratio == 0.0f) {
+      // 待機時の動き
+      interval_time = random(interval_min, interval_max);
+      move_time = random(move_time_min, move_time_max);
+      lipsync_level_max = 20.0f; // リップシンク上限の初期化
+      sing_mode = false;
+
+    } else {
+      // 歌うモードの動き
+      interval_time = 1;
+      move_time = random(sing_interval_min, sing_interval_max);
+      sing_mode = true;
+    } 
+    avatar.getGaze(&gaze_y, &gaze_x);
+    
+//    Serial.printf("x:%f:y:%f\n", gaze_x, gaze_y);
+    // X軸は90°から+-で左右にスイング
+    if (gaze_x < 0) {
+      move_x = START_DEGREE_VALUE_X - mouth_ratio * 15 + (int)(15.0 * gaze_x);
+    } else {
+      move_x = START_DEGREE_VALUE_X + mouth_ratio * 15 + (int)(15.0 * gaze_x);
+    }
+    // Y軸は90°から上にスイング（最大35°）
+    move_y = START_DEGREE_VALUE_Y - mouth_ratio * 15 - abs(20.0 * gaze_y);
+    moveXY(move_x, move_y, move_time);
+    if (sing_mode) {
+      // 歌っているときはうなずく
+      moveXY(move_x, move_y + 10, 400);
+    }
+    vTaskDelay(interval_time/portTICK_PERIOD_MS);
+
+  }
+}
+
 
 void lipSync(void *args)
 {
@@ -489,30 +591,25 @@ void lipSync(void *args)
   Avatar *avatar = ctx->getAvatar();
    for (;;)
   {
-    //int level = a2dp_sink.audio_level;
-//    printf("data=%d\n\r",lipsync_level);
+    // スレッド内でログを出そうとすると不具合が起きる場合があります。
+    //printf("data=%d\n\r",lipsync_level);
     lipsync_level = abs(lipsync_level);
-//    lipsync_level *= 3;
-    if(lipsync_level > 100)
-    {
-      lipsync_level = 100;
-//      avatar->setExpression(Expression::Happy);
+    float open = (float)lipsync_level/lipsync_level_max;
+    mouth_ratio = open;
+    if (mouth_ratio > 1.2f) {
+      if (mouth_ratio > 1.5f) {
+        lipsync_level_max += 10.0f; // リップシンク上限を大幅に超えるごとに上限を上げていく。
+      }
+      mouth_ratio = 1.2f;
     }
-//    else
-//    {
-//      avatar->setExpression(Expression::Neutral);
-//    }
-    float open = (float)lipsync_level/100.0;
-    avatar->setMouthOpenRatio(open);
-//    avatar->getGaze(&gazeY, &gazeX);
-//    avatar->setRotation(gazeX * 10);
-    delay(50);
+    avatar->setMouthOpenRatio(mouth_ratio);
+    vTaskDelay(1/portTICK_PERIOD_MS);
   }
 }
 
-void setup()
+void setup(void)
 {
- auto cfg = M5.config();
+  auto cfg = M5.config();
 
   cfg.external_spk = true;    /// use external speaker (SPK HAT / ATOMIC SPK)
 //cfg.external_spk_detail.omit_atomic_spk = true; // exclude ATOMIC SPK
@@ -525,23 +622,14 @@ void setup()
     auto spk_cfg = M5.Speaker.config();
     /// Increasing the sample_rate will improve the sound quality instead of increasing the CPU load.
     spk_cfg.sample_rate = 96000; // default:48000 (48kHz)  e.g. 50000 , 80000 , 96000 , 100000 , 144000 , 192000
+    // spk_cfg.task_pinned_core = 0;
+    // spk_cfg.task_priority = configMAX_PRIORITIES - 2;
     M5.Speaker.config(spk_cfg);
   }
 
+  M5.Speaker.setVolume(128);
 
   M5.Speaker.begin();
-
-  M5.Display.setBrightness(128);
-  
-  header_height = 48;
-  for (int x = 0; x < (FFT_SIZE/2)+1; ++x)
-  {
-    prev_y[x] = INT16_MAX;
-    peak_y[x] = INT16_MAX;
-  }
-
-  a2dp_sink.start(bt_device_name, false);
-
   gfx2 = new M5UnitLCD();
   if(!gfx2->init()) {
     delete gfx2;
@@ -549,28 +637,28 @@ void setup()
     gfx2->init();
   }
   gfxSetup(gfx2);
-#ifdef USE_ATARU_FACE  
-  face = new AtaruFace();
-  cp = new ColorPalette();
-  cp->set(COLOR_PRIMARY, TFT_BLACK);
-  cp->set(COLOR_BACKGROUND, TFT_WHITE);
-  cp->set(COLOR_SECONDARY, TFT_WHITE);
-#endif
+
+  if (servo_x.attach(SERVO_PIN_X, 
+                     START_DEGREE_VALUE_X + servo_offset_x,
+                     DEFAULT_MICROSECONDS_FOR_0_DEGREE,
+                     DEFAULT_MICROSECONDS_FOR_180_DEGREE)) {
+    Serial.print("Error attaching servo x");
+  }
+  if (servo_y.attach(SERVO_PIN_Y,
+                     START_DEGREE_VALUE_Y + servo_offset_y,
+                     DEFAULT_MICROSECONDS_FOR_0_DEGREE,
+                     DEFAULT_MICROSECONDS_FOR_180_DEGREE)) {
+    Serial.print("Error attaching servo y");
+  }
+  servo_x.setEasingType(EASE_QUADRATIC_IN_OUT);
+  servo_y.setEasingType(EASE_QUADRATIC_IN_OUT);
   avatar.init(); // start drawing
-#ifdef USE_ATARU_FACE  
-  avatar.setFace(face);
-  avatar.setColorPalette(*cp);
-#endif
-  avatar.setExpression(Expression::Sleepy);    
   avatar.addTask(lipSync, "lipSync");
-//  xTaskCreatePinnedToCore(
-//                    lipSync1,     /* Function to implement the task */
-//                    "lipSync1",   /* Name of the task */
-//                    1024,      /* Stack size in words */
-//                    NULL,      /* Task input parameter */
-//                    3,         /* Priority of the task */
-//                    NULL,      /* Task handle. */
-//                    0);        /* Core where the task should run */
+  avatar.addTask(servoLoop, "servoLoop");
+
+
+  a2dp_sink.start(bt_device_name, false);
+
 }
 
 void loop(void)
