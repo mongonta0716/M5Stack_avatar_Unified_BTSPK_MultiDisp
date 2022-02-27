@@ -69,7 +69,7 @@ static long sing_interval_max = 2000;   // 歌うモードのサーボ移動時�
 static constexpr uint8_t m5spk_virtual_channel = 0;
 
 /// set ESP32-A2DP device name
-static constexpr char bt_device_name[] = "ESP322";
+static constexpr char bt_device_name[] = "ESP32";
 
 
 class BluetoothA2DPSink_M5Speaker : public BluetoothA2DPSink
@@ -105,6 +105,7 @@ protected:
   bool _flip_index = 0;
   char _meta_text[metatext_num][metatext_size];
   uint8_t _meta_bits = 0;
+  bool _sing_happy = true;
   size_t _sample_rate = 48000;
 
   void clearMetaData(void)
@@ -124,23 +125,29 @@ protected:
     case ESP_A2D_CONNECTION_STATE_EVT:
       if (ESP_A2D_CONNECTION_STATE_CONNECTED == a2d->conn_stat.state)
       { // 接続
-
+        avatar.setExpression(Expression::Neutral);
       }
       else
       if (ESP_A2D_CONNECTION_STATE_DISCONNECTED == a2d->conn_stat.state)
       { // 切断
-
+        avatar.setExpression(Expression::Sad);
       }
       break;
 
     case ESP_A2D_AUDIO_STATE_EVT:
       if (ESP_A2D_AUDIO_STATE_STARTED == a2d->audio_stat.state)
       { // 再生
-
+        if (_sing_happy) {
+          avatar.setExpression(Expression::Happy);
+        } else {
+          avatar.setExpression(Expression::Neutral);
+        }
+        _sing_happy = !_sing_happy;
       } else
       if ( ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND == a2d->audio_stat.state
         || ESP_A2D_AUDIO_STATE_STOPPED        == a2d->audio_stat.state )
       { // 停止
+        avatar.setExpression(Expression::Sleepy);
         clearMetaData();
       }
       break;
@@ -607,6 +614,11 @@ void lipSync(void *args)
   }
 }
 
+void avrc_metadata_callback(uint8_t data1, const uint8_t *data2)
+{
+  Serial.printf("AVRC metadata rsp: attribute id 0x%x, %s\n", data1, data2);
+}
+
 void setup(void)
 {
   auto cfg = M5.config();
@@ -655,11 +667,13 @@ void setup(void)
   avatar.init(); // start drawing
   avatar.addTask(lipSync, "lipSync");
   avatar.addTask(servoLoop, "servoLoop");
+  avatar.setExpression(Expression::Sad);
 
-
+  a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
   a2dp_sink.start(bt_device_name, false);
 
 }
+
 
 void loop(void)
 {
