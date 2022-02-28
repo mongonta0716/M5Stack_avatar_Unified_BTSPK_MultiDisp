@@ -6,7 +6,7 @@
 #define DRAWCONTEXT_H_
 
 #if defined( ARDUINO_M5STACK_FIRE ) || defined(ARDUINO_M5STACK_Core2)
-#define COLOR_DEPTH 8
+#define COLOR_DEPTH 1
 #else
 #define COLOR_DEPTH 1
 #endif

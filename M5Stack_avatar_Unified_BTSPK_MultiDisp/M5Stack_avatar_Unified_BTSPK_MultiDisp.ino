@@ -1,7 +1,6 @@
 #include <M5UnitLCD.h>
 #include <M5UnitOLED.h>
 #include <M5Unified.h>
-#include <driver/adc.h>
 LGFX_Device* gfx2 = nullptr;
 
 // --------------------
@@ -37,8 +36,9 @@ using namespace m5avatar;
 
 Avatar avatar;
 static int32_t lipsync_level = 0;       // リップシンク値
-static float lipsync_level_max = 20.0f; // リップシンクの上限初期値
+static float lipsync_level_max = 10.0f; // リップシンクの上限初期値
 float mouth_ratio = 0.0f;
+bool sing_happy = true;
 // Avatar関連の設定 end
 // --------------------
 
@@ -52,12 +52,17 @@ ServoEasing servo_y;
 #define START_DEGREE_VALUE_Y 90
 int servo_offset_x = 0;                 // X軸サーボのオフセット（90°からの+-で設定）
 int servo_offset_y = 0;                 // Y軸サーボのオフセット（90°からの+-で設定）
-static long interval_min = 1000;        // 待機時インターバル最小
-static long interval_max = 5000;        // 待機時インターバル最大
-static long move_time_min = 500;        // 待機時のサーボ移動時間最小
-static long move_time_max = 1000;       // 待機時のサーボ移動時間最大
-static long sing_interval_min = 1000;   // 歌うモードのサーボ移動時間最小
-static long sing_interval_max = 2000;   // 歌うモードのサーボ移動時間最大
+
+// ----- あまり間隔を短くしすぎるとサーボが壊れやすくなるので注意(単位:msec)
+static long interval_min      = 5000;        // 待機時インターバル最小
+static long interval_max      = 10000;       // 待機時インターバル最大
+static long move_time_min     = 1000;        // 待機時のサーボ移動時間最小
+static long move_time_max     = 2000;        // 待機時のサーボ移動時間最大
+static long sing_interval_min = 500;         // 歌うモードのインターバル最小
+static long sing_interval_max = 1000;        // 歌うモードのインターバル最大
+static long sing_move_min     = 1000;        // 歌うモードのサーボ移動時間最小
+static long sing_move_max     = 2000;        // 歌うモードのサーボ移動時間最大
+
 // サーボ関連の設定 end
 // --------------------
 
@@ -565,8 +570,8 @@ void servoLoop(void *args) {
 
     } else {
       // 歌うモードの動き
-      interval_time = 1;
-      move_time = random(sing_interval_min, sing_interval_max);
+      interval_time = random(sing_interval_min, sing_interval_max);
+      move_time = random(sing_move_min, sing_move_max);
       sing_mode = true;
     } 
     avatar.getGaze(&gaze_y, &gaze_x);
@@ -614,9 +619,18 @@ void lipSync(void *args)
   }
 }
 
+
+
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2)
 {
   Serial.printf("AVRC metadata rsp: attribute id 0x%x, %s\n", data1, data2);
+  if (sing_happy) {
+    avatar.setExpression(Expression::Happy);
+  } else {
+    avatar.setExpression(Expression::Neutral);
+  }
+  sing_happy = !sing_happy;
+
 }
 
 void setup(void)
